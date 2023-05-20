@@ -2,6 +2,8 @@ import argparse
 import os
 import random
 import logging
+import math
+import base64
 
 import cryptography.hazmat.backends
 from cryptography.hazmat.primitives.asymmetric import padding
@@ -16,6 +18,20 @@ BASE64_CHARS = (b"ABCDEFGHIJKLMNOPQRSTUVWXYZ"
 
 
 logging.basicConfig(level=logging.DEBUG)
+
+def decode_base64_no_padding(input):
+    # Add missing "=" padding
+    input = input + "=" * (4 - len(input) % 4)
+    # Decode base64 input
+    decoded = base64.b64decode(input)
+    return decoded
+
+def encode_base64_no_padding(bytes):
+    # Encode bytes to base64
+    base64_bytes = base64.b64encode(bytes)
+    # Strip any padding characters
+    base64_string = base64_bytes.rstrip(b'=').decode('utf-8')
+    return base64_string
 
 
 def close_prime(n):
@@ -100,11 +116,17 @@ def inject_vanity_ssh(priv_key, vanity):
     return pub_key
 
 
-def inject_vanity_pem(priv_key, vanity):
+def inject_vanity_pem(priv_key, vanity, offset):
     """Embed the vanity text in an PEM-format public key
 
     This key is likely not a valid key, though."""
     logging.debug("Injecting pem vanity")
+    # If the user requested to offset the base64, apply it
+    if offset > 0:
+        b64_bytes = decode_base64_no_padding(vanity)
+        b64_bytes = bytes([0xFF] * offset) + b64_bytes
+        vanity = encode_base64_no_padding(b64_bytes)
+    #print(vanity)
     vanity = vanity.encode()
     assert all(c in BASE64_CHARS for c in vanity)
 
@@ -118,11 +140,23 @@ def inject_vanity_pem(priv_key, vanity):
         # The last 14 characters of the first line encode N
         lines[1] = lines[1][:-len(vanity)] + vanity
     else:
-        # The second line is the first line that's entirely encoding N
-        lines[2] = vanity + lines[2][len(vanity):]
+        # Each line can hold up to 64 b64 chars
+        encode_lines = math.ceil(len(vanity) / 64)
+        last_line_length = len(vanity) % 64
+        if last_line_length == 0:
+            last_line_length = 64
+        for i in range(2, 2 + encode_lines - 1):
+            vanity_start = (i - 2) * 64
+            vanity_end = vanity_start + min(64, len(vanity) - vanity_start)
+            lines[i] = vanity[vanity_start:vanity_end]
+        # The last line may be shorter than full length
+        last_index = 2 + encode_lines - 1
+        vanity_start = (encode_lines - 1) * 64
+        vanity_end = vanity_start + last_line_length
+        lines[last_index] = vanity[vanity_start:vanity_end] + lines[last_index][last_line_length:]
 
     public_key_repr = b'\n'.join(lines)
-    # print(public_key_repr)
+    #print(public_key_repr.decode("utf-8"))
 
     # We now have an invalid vanity key. Time to read it back in.
     pub_key = serialization.load_pem_public_key(public_key_repr, BACKEND)
@@ -228,7 +262,7 @@ def make_valid_rsa_key(priv_key, pub_key):
     ).private_key(BACKEND, unsafe_skip_rsa_key_validation=True)
 
 
-def make_key(vanity, key_length=1024, key_format='ssh'):
+def make_key(vanity, key_length=1024, key_format='ssh', pem_offset=0):
     """Generate a valid key with the specified vanity string"""
     # Generate a key to start with. This way we inherit several of the wise
     # choices made by the cryptography authors. (mostly on P selection)
@@ -237,7 +271,7 @@ def make_key(vanity, key_length=1024, key_format='ssh'):
 
     # Apply some vanity
     if key_format == 'pem':
-        pub_key = inject_vanity_pem(priv_key, vanity)
+        pub_key = inject_vanity_pem(priv_key, vanity, pem_offset)
     elif key_format == 'ssh':
         pub_key = inject_vanity_ssh(priv_key, vanity)
     else:
@@ -261,13 +295,15 @@ def main():
                         help="Where to save the private key")
     parser.add_argument('--output-file-public', default='',
                         help="Where to save the public key")
+    parser.add_argument('--pem-offset', type=int, default=0,
+                        help="For PEM keys, an optional offset for base64 alignment. Can be either 0, 1 or 2")
     args = parser.parse_args()
     key_format = args.key_format.lower()
 
     logging.info("Making a key…")
     # Get the key
     key = make_key(args.vanity, key_length=args.key_length,
-                   key_format=key_format)
+                   key_format=key_format, pem_offset=args.pem_offset)
 
     logging.info("Testing the key…")
     # Make sure the key actually works

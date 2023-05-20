@@ -2,6 +2,16 @@ This tool generates valid RSA keypairs which contain some piece of text. The
 details are discussed in the accompanying 
 [blog post](https://ondergetekende.nl/vanity-rsa-public-key.html).
 
+Fork notes
+---
+
+I changed the script to support multi-line base64 text on PEM encoded keys.
+In addition, I added an option to apply an offset to PEM encoded keys,
+since base64 groups by 3 bytes and we cannot guarantee that a CA issued
+certificate aligns exactly on this 3 byte boundary. So you can try out
+with offsets 0, 1 or 2 to see which one gets the correct alignment in
+the final certificate.
+
 Use
 ---
 
